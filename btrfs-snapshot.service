@@ -1,0 +1,6 @@
+[Unit]
+Description=BTRFS snapshot
+
+[Service]
+Type=oneshot
+ExecStart=/etc/systemd/system/btrfs-snapshot /home /data/home-backups

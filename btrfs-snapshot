@@ -1,0 +1,96 @@
+#!/usr/bin/python
+# -*- python -*-
+
+import sys
+import subprocess
+import argparse
+import os
+import time
+
+class snapshotter:
+    def __init__(self, source, dest, prefix = 'backup', prefix_snapshots = '.backup'):
+        self.source = source
+        self.dest = dest
+        self.prefix = prefix
+
+        self.source_snap1 = os.path.join(source, prefix_snapshots)
+        self.source_snap2 = os.path.join(source, prefix_snapshots + '-new')
+        
+        self.dest_snap1 = os.path.join(dest, prefix_snapshots)
+        self.dest_snap2 = os.path.join(dest, prefix_snapshots + '-new')
+        
+    @staticmethod
+    def datestr():
+        return time.strftime('%Y%m%d-%H%M%S', time.localtime())
+
+    def first_snapshot(self):
+        subprocess.check_call(['btrfs', 'subvolume', 'snapshot', '-r', self.source, self.source_snap1])
+        subprocess.check_call(['sync'])
+
+        print('Sending the snapshot to {0}'.format(self.dest))
+        cmd1 = ['btrfs', 'send', self.source_snap1]
+        cmd2 = ['btrfs', 'receive', self.dest]
+        proc1 = subprocess.Popen(cmd1, stdout=subprocess.PIPE)
+        proc2 = subprocess.Popen(cmd2, stdin=proc1.stdout)
+        proc2.communicate()
+        if proc2.returncode != 0:
+            raise subprocess.CalledProcessError(proc2.returncode, cmd2)
+    
+    def new_snapshot(self):
+        try:
+            subprocess.check_call(['btrfs', 'subvolume', 'snapshot', '-r', self.source, self.source_snap2])
+            subprocess.check_call(['sync'])
+
+            print('Sending the snapshot to {0}'.format(self.dest))
+            cmd1 = ['btrfs', 'send', '-p', self.source_snap1, self.source_snap2]
+            cmd2 = ['btrfs', 'receive', self.dest]
+            proc1 = subprocess.Popen(cmd1, stdout=subprocess.PIPE)
+            proc2 = subprocess.Popen(cmd2, stdin=proc1.stdout)
+            proc2.communicate()
+            if proc2.returncode != 0:
+                raise subprocess.CalledProcessError(proc2.returncode, cmd2)
+        except:
+            subprocess.call(['btrfs', 'subvolume', 'delete', self.source_snap2])
+            subprocess.call(['btrfs', 'subvolume', 'delete', self.dest_snap2])
+            raise
+        
+        subprocess.check_call(['btrfs', 'subvolume', 'delete', self.source_snap1])
+        os.rename(self.source_snap2, self.source_snap1)
+        
+        subprocess.check_call(['btrfs', 'subvolume', 'delete', self.dest_snap1])
+        os.rename(self.dest_snap2, self.dest_snap1)
+
+        snaploc = os.path.join(self.dest, self.prefix + '-' + self.datestr())
+        subprocess.check_call(['btrfs', 'subvolume', 'snapshot', '-r', self.dest_snap1, snaploc])
+
+        return snaploc
+
+    def delete_snapshot(self, snaploc):
+        subprocess.check_output(['btrfs', 'subvolume', 'delete', snaploc])
+
+    def list_snapshot(self):
+        return sorted([ os.path.join(self.dest, x) for x in os.listdir(self.dest) if x.startswith(self.prefix) ])
+
+    def delete_oldest_snapshots(self, max_count):
+        lst = self.list_snapshot()
+        for i in range(0, len(lst) - max_count):
+            self.delete_snapshot(lst[i])
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Backup a btrfs subvolume on another btrfs filesystem')
+    parser.add_argument('source', help='Source subvolume')
+    parser.add_argument('destination', help='Destination subvolume')
+    
+    args = parser.parse_args()
+
+    snap = snapshotter(args.source, args.destination)
+
+    if os.access(snap.source_snap1, os.R_OK) and os.access(snap.dest_snap1, os.R_OK):
+        print('Incremental backup from {0} to {1}'.format(snap.source, snap.dest))
+        snap.new_snapshot()
+    else:
+        print('Initial backup from {0} to {1}'.format(snap.source, snap.dest))
+        snap.first_snapshot()
+
+    print('Removing old snapshots')
+    snap.delete_oldest_snapshots(10)
